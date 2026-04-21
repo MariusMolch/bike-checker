@@ -254,6 +254,7 @@ def main():
 
     check_availability()
     schedule.every(INTERVALL_MIN).minutes.do(check_availability)
+    schedule.every().day.at("12:00").do(send_daily_summary)
     schedule.every().day.at("20:00").do(send_daily_summary)
 
     while True:

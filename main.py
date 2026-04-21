@@ -6,6 +6,7 @@ und schickt eine HTML-Tabelle per E-Mail.
 """
 
 import os
+import shutil
 import smtplib
 import schedule
 import time
@@ -31,6 +32,9 @@ GMAIL_APP_PW   = os.environ["GMAIL_APP_PW"]
 
 INTERVALL_MIN  = int(os.environ.get("INTERVALL_MIN", "30"))
 SCREENSHOT_DIR = Path("screenshots")
+
+_CHROMIUM_CANDIDATES = ["/usr/bin/chromium", "/usr/bin/chromium-browser"]
+CHROMIUM_PATH = next((p for p in _CHROMIUM_CANDIDATES if shutil.which(p)), None)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,7 +111,10 @@ def check_availability() -> None:
 
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                launch_args = {"headless": True}
+                if CHROMIUM_PATH:
+                    launch_args["executable_path"] = CHROMIUM_PATH
+                browser = p.chromium.launch(**launch_args)
                 page = browser.new_page(
                     viewport={"width": 1280, "height": 900},
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",

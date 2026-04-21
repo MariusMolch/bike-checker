@@ -11,19 +11,60 @@ Checks availability of a Cube bike at local dealers and sends an email notificat
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
+   ```
+
+2. Install Chromium:
+
+   **Linux / macOS / Windows** — Playwright's bundled Chromium:
+   ```bash
    playwright install chromium
    playwright install-deps chromium
    ```
 
-2. Copy `.env.example` to `.env` and fill in your values:
+   **Raspberry Pi (ARM)** — System Chromium (Playwright's bundled binary doesn't support ARM):
+   ```bash
+   sudo apt update && sudo apt install -y chromium
+   ```
+   The script auto-detects `/usr/bin/chromium` and `/usr/bin/chromium-browser` and uses whichever is present. No extra config needed.
+
+3. Copy `.env.example` to `.env` and fill in your values:
    ```bash
    cp .env.example .env
    ```
 
-3. Run:
+4. Run:
    ```bash
    python main.py
    ```
+
+### Run as a systemd service (Raspberry Pi)
+
+To start the checker automatically on boot:
+
+```bash
+sudo nano /etc/systemd/system/bike-checker.service
+```
+
+```ini
+[Unit]
+Description=Cube Bike Checker
+After=network.target
+
+[Service]
+WorkingDirectory=/home/pi/bike-checker
+ExecStart=/home/pi/bike-checker/.venv/bin/python main.py
+Restart=always
+User=pi
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now bike-checker
+# Check logs:
+journalctl -u bike-checker -f
+```
 
 ## Configuration (`.env`)
 

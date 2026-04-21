@@ -14,6 +14,8 @@ import logging
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
@@ -102,9 +104,9 @@ def build_html_table(groesse: str, stores: list[dict]) -> str:
     """
 
 
-def check_availability() -> None:
+def run_check() -> list[tuple[str, list[dict]]]:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    all_results: list[tuple[str, list[dict]]] = []  # (groesse, stores)
+    all_results: list[tuple[str, list[dict]]] = []
 
     for groesse in RAHMENGROESSEN:
         log.info(f"Prüfe Verfügbarkeit für Größe {groesse} mit PLZ {PLZ} …")
@@ -125,7 +127,7 @@ def check_availability() -> None:
                 # Cookie-Banner wegklicken
                 try:
                     page.locator("button:has-text('Akzeptieren'), button:has-text('Alle akzeptieren')").first.click(timeout=8_000)
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(1_000)
                 except Exception:
                     pass
 
@@ -133,18 +135,18 @@ def check_availability() -> None:
                 page.locator("#js_elio-store-locator-availability-link").click(timeout=10_000)
                 form = page.locator("#js_store-locator-availability-form")
                 form.wait_for(timeout=10_000)
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(1_000)
 
                 # Rahmengröße auswählen
                 groesse_label = groesse.replace("cm", " cm")
                 try:
                     form.locator(".elio-custom-select-button.form-select").click(timeout=5_000)
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(800)
                     form.locator(
                         f".elio-custom-select-option.form-select:has-text('{groesse_label}')"
                     ).click(timeout=5_000)
                     log.info(f"  Größe '{groesse_label}' ausgewählt")
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(800)
                 except Exception:
                     log.warning(f"  Größe '{groesse}' nicht auswählbar")
 
@@ -152,11 +154,11 @@ def check_availability() -> None:
                 plz_input = page.locator("#js_store-locator-availability-input")
                 plz_input.click(timeout=5_000)
                 plz_input.fill(PLZ, timeout=5_000)
-                page.wait_for_timeout(1_500)
-                page.keyboard.press("ArrowDown")
-                page.wait_for_timeout(300)
-                page.keyboard.press("Enter")
                 page.wait_for_timeout(3_000)
+                page.keyboard.press("ArrowDown")
+                page.wait_for_timeout(800)
+                page.keyboard.press("Enter")
+                page.wait_for_timeout(4_000)
 
                 # Stores scrapen
                 stores = scrape_stores(page)
@@ -176,25 +178,41 @@ def check_availability() -> None:
         except Exception as exc:
             log.error(f"  Unerwarteter Fehler: {exc}", exc_info=True)
 
-    if all_results:
-        send_email(all_results)
+    return all_results
 
 
-def send_email(results: list[tuple[str, list[dict]]]) -> None:
-    # Betreff: VERFÜGBAR wenn mindestens ein Laden avail==1, sonst Update
-    verfuegbar_in = []
-    for groesse, stores in results:
-        for s in stores:
-            if s["avail"] == "1":
-                verfuegbar_in.append(f"{groesse} in {s['name']}")
+def check_availability() -> None:
+    if datetime.now().hour < 8:
+        log.info("Außerhalb der Prüfzeit (0–8 Uhr), überspringe.")
+        return
+    results = run_check()
+    if results:
+        has_available = any(s["avail"] == "1" for _, stores in results for s in stores)
+        if has_available:
+            send_email(results)
+
+
+def send_daily_summary() -> None:
+    log.info("=== Tagesabschluss 20 Uhr ===")
+    results = run_check()
+    if results:
+        send_email(results, daily_summary=True)
+
+
+def send_email(results: list[tuple[str, list[dict]]], daily_summary: bool = False) -> None:
+    verfuegbar_in = [
+        f"{groesse} in {s['name']}"
+        for groesse, stores in results
+        for s in stores
+        if s["avail"] == "1"
+    ]
 
     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-    if verfuegbar_in:
-        subject = f"🚨🔥 Agree C:62 Race VERFÜGBAR – {', '.join(verfuegbar_in)} 🚨🔥"
+    if daily_summary:
+        subject = f"Tagesabschluss {now_str} – {'VERFÜGBAR: ' + ', '.join(verfuegbar_in) if verfuegbar_in else 'nichts verfügbar'}"
     else:
-        subject = f"Update {now_str}"
+        subject = f"🚨🔥 Agree C:62 Race VERFÜGBAR – {', '.join(verfuegbar_in)} 🚨🔥"
 
-    # HTML-Body mit einer Tabelle pro Größe
     html_tables = "".join(build_html_table(g, s) for g, s in results)
     html_body = f"""
     <html><body style='font-family:sans-serif'>
@@ -204,11 +222,19 @@ def send_email(results: list[tuple[str, list[dict]]]) -> None:
     </body></html>
     """
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")
     msg["From"]    = ABSENDER_MAIL
     msg["To"]      = EMPFANGER_MAIL
     msg["Subject"] = subject
     msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    if daily_summary and Path("cube_checker.log").exists():
+        with open("cube_checker.log", "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        part.add_header("Content-Disposition", "attachment", filename="cube_checker.log")
+        msg.attach(part)
 
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -228,6 +254,7 @@ def main():
 
     check_availability()
     schedule.every(INTERVALL_MIN).minutes.do(check_availability)
+    schedule.every().day.at("20:00").do(send_daily_summary)
 
     while True:
         schedule.run_pending()

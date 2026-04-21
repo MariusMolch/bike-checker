@@ -51,20 +51,30 @@ Description=Cube Bike Checker
 After=network.target
 
 [Service]
-WorkingDirectory=/home/pi/bike-checker
-ExecStart=/home/pi/bike-checker/.venv/bin/python main.py
+WorkingDirectory=/home/<your-user>/bike-checker
+ExecStart=/home/<your-user>/bike-checker/.venv/bin/python main.py
 Restart=always
-User=pi
+User=<your-user>
 
 [Install]
 WantedBy=multi-user.target
 ```
 
+Replace `<your-user>` with your actual username (e.g. `pi` or whatever `whoami` returns).
+
 ```bash
 sudo systemctl enable --now bike-checker
-# Check logs:
-journalctl -u bike-checker -f
 ```
+
+Useful commands:
+```bash
+sudo systemctl status bike-checker   # check if running
+sudo systemctl stop bike-checker     # stop the service
+sudo systemctl restart bike-checker  # restart (e.g. after git pull)
+journalctl -u bike-checker -f        # live logs
+```
+
+> `Restart=always` means systemd will automatically restart the script if it crashes or is killed. To permanently stop it, use `systemctl stop`.
 
 ## Configuration (`.env`)
 

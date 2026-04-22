@@ -6,11 +6,14 @@ und schickt eine HTML-Tabelle per E-Mail.
 """
 
 import os
+import json
 import shutil
 import smtplib
+import threading
 import schedule
 import time
 import logging
+import requests
 from pathlib import Path
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,6 +37,9 @@ GMAIL_APP_PW   = os.environ["GMAIL_APP_PW"]
 
 INTERVALL_MIN  = int(os.environ.get("INTERVALL_MIN", "30"))
 SCREENSHOT_DIR = Path("screenshots")
+
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
 
 _CHROMIUM_CANDIDATES = ["/usr/bin/chromium", "/usr/bin/chromium-browser"]
 CHROMIUM_PATH = next((p for p in _CHROMIUM_CANDIDATES if shutil.which(p)), None)
@@ -246,11 +252,78 @@ def send_email(results: list[tuple[str, list[dict]]], daily_summary: bool = Fals
         log.error(f"  E-Mail-Versand fehlgeschlagen: {exc}")
 
 
+def ntfy_publish(message: str, title: str = "Bike Checker") -> None:
+    if not NTFY_TOPIC or not NTFY_TOKEN:
+        return
+    try:
+        requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={"Authorization": f"Bearer {NTFY_TOKEN}", "Title": title, "Tags": "from-script"},
+            timeout=10,
+        )
+    except Exception as exc:
+        log.error(f"ntfy publish fehlgeschlagen: {exc}")
+
+
+_check_lock = threading.Lock()
+
+def on_demand_check() -> None:
+    if not _check_lock.acquire(blocking=False):
+        log.info("Prüfung läuft bereits, Trigger ignoriert.")
+        ntfy_publish("Prüfung läuft bereits, bitte kurz warten.", title="Bike Checker")
+        return
+    try:
+        log.info("=== On-Demand Prüfung (ntfy Trigger) ===")
+        ntfy_publish("Prüfung gestartet…", title="Bike Checker")
+        results = run_check()
+        if not results:
+            ntfy_publish("Prüfung fehlgeschlagen.", title="Bike Checker Fehler")
+            return
+        send_email(results, daily_summary=True)
+        has_available = any(s["avail"] == "1" for _, stores in results for s in stores)
+        if has_available:
+            verfuegbar = [f"{g}: {s['name']}" for g, stores in results for s in stores if s["avail"] == "1"]
+            ntfy_publish("🚨 VERFÜGBAR: " + ", ".join(verfuegbar), title="Bike verfügbar!")
+        else:
+            ntfy_publish("Kein Bike verfügbar. Mail mit Details gesendet.", title="Bike Checker")
+    finally:
+        _check_lock.release()
+
+
+def ntfy_listener() -> None:
+    if not NTFY_TOPIC or not NTFY_TOKEN:
+        return
+    log.info(f"ntfy Listener gestartet (Topic: {NTFY_TOPIC})")
+    while True:
+        try:
+            with requests.get(
+                f"https://ntfy.sh/{NTFY_TOPIC}/json",
+                headers={"Authorization": f"Bearer {NTFY_TOKEN}"},
+                stream=True,
+                timeout=None,
+            ) as resp:
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    msg = json.loads(line)
+                    if msg.get("event") == "message":
+                        if "from-script" in (msg.get("tags") or []):
+                            continue
+                        log.info(f"ntfy Trigger empfangen: {msg.get('message', '')}")
+                        threading.Thread(target=on_demand_check, daemon=True).start()
+        except Exception as exc:
+            log.error(f"ntfy Listener Fehler: {exc} – Neuverbindung in 30s")
+            time.sleep(30)
+
+
 def main():
     log.info("=== Cube Availability Checker gestartet ===")
     log.info(f"URL: {BIKE_URL}")
     log.info(f"PLZ: {PLZ}  |  Größen: {', '.join(RAHMENGROESSEN)}")
     log.info(f"Intervall: alle {INTERVALL_MIN} Minuten")
+
+    threading.Thread(target=ntfy_listener, daemon=True).start()
 
     check_availability()
     schedule.every(INTERVALL_MIN).minutes.do(check_availability)

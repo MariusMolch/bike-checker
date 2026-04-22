@@ -115,74 +115,80 @@ def run_check() -> list[tuple[str, list[dict]]]:
     all_results: list[tuple[str, list[dict]]] = []
 
     for groesse in RAHMENGROESSEN:
-        log.info(f"Prüfe Verfügbarkeit für Größe {groesse} mit PLZ {PLZ} …")
+        for versuch in range(1, 3):
+            log.info(f"Prüfe Verfügbarkeit für Größe {groesse} mit PLZ {PLZ} … (Versuch {versuch}/2)")
+            try:
+                with sync_playwright() as p:
+                    launch_args = {"headless": True}
+                    if CHROMIUM_PATH:
+                        launch_args["executable_path"] = CHROMIUM_PATH
+                    browser = p.chromium.launch(**launch_args)
+                    page = browser.new_page(
+                        viewport={"width": 1280, "height": 900},
+                        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    )
 
-        try:
-            with sync_playwright() as p:
-                launch_args = {"headless": True}
-                if CHROMIUM_PATH:
-                    launch_args["executable_path"] = CHROMIUM_PATH
-                browser = p.chromium.launch(**launch_args)
-                page = browser.new_page(
-                    viewport={"width": 1280, "height": 900},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                )
+                    page.goto(BIKE_URL, wait_until="domcontentloaded", timeout=30_000)
 
-                page.goto(BIKE_URL, wait_until="domcontentloaded", timeout=30_000)
+                    # Cookie-Banner wegklicken
+                    try:
+                        page.locator("button:has-text('Akzeptieren'), button:has-text('Alle akzeptieren')").first.click(timeout=8_000)
+                        page.wait_for_timeout(1_000)
+                    except Exception:
+                        pass
 
-                # Cookie-Banner wegklicken
-                try:
-                    page.locator("button:has-text('Akzeptieren'), button:has-text('Alle akzeptieren')").first.click(timeout=8_000)
+                    # Verfügbarkeits-Panel öffnen
+                    page.locator("#js_elio-store-locator-availability-link").click(timeout=10_000)
+                    form = page.locator("#js_store-locator-availability-form")
+                    form.wait_for(timeout=10_000)
                     page.wait_for_timeout(1_000)
-                except Exception:
-                    pass
 
-                # Verfügbarkeits-Panel öffnen
-                page.locator("#js_elio-store-locator-availability-link").click(timeout=10_000)
-                form = page.locator("#js_store-locator-availability-form")
-                form.wait_for(timeout=10_000)
-                page.wait_for_timeout(1_000)
+                    # Rahmengröße auswählen
+                    groesse_label = groesse.replace("cm", " cm")
+                    try:
+                        form.locator(".elio-custom-select-button.form-select").click(timeout=5_000)
+                        page.wait_for_timeout(800)
+                        form.locator(
+                            f".elio-custom-select-option.form-select:has-text('{groesse_label}')"
+                        ).click(timeout=5_000)
+                        log.info(f"  Größe '{groesse_label}' ausgewählt")
+                        page.wait_for_timeout(800)
+                    except Exception:
+                        log.warning(f"  Größe '{groesse}' nicht auswählbar")
 
-                # Rahmengröße auswählen
-                groesse_label = groesse.replace("cm", " cm")
-                try:
-                    form.locator(".elio-custom-select-button.form-select").click(timeout=5_000)
+                    # PLZ eingeben (Google Places Autocomplete)
+                    plz_input = page.locator("#js_store-locator-availability-input")
+                    plz_input.click(timeout=5_000)
+                    plz_input.fill(PLZ, timeout=5_000)
+                    page.wait_for_timeout(3_000)
+                    page.keyboard.press("ArrowDown")
                     page.wait_for_timeout(800)
-                    form.locator(
-                        f".elio-custom-select-option.form-select:has-text('{groesse_label}')"
-                    ).click(timeout=5_000)
-                    log.info(f"  Größe '{groesse_label}' ausgewählt")
-                    page.wait_for_timeout(800)
-                except Exception:
-                    log.warning(f"  Größe '{groesse}' nicht auswählbar")
+                    page.keyboard.press("Enter")
+                    page.wait_for_timeout(4_000)
 
-                # PLZ eingeben (Google Places Autocomplete)
-                plz_input = page.locator("#js_store-locator-availability-input")
-                plz_input.click(timeout=5_000)
-                plz_input.fill(PLZ, timeout=5_000)
-                page.wait_for_timeout(3_000)
-                page.keyboard.press("ArrowDown")
-                page.wait_for_timeout(800)
-                page.keyboard.press("Enter")
-                page.wait_for_timeout(4_000)
+                    # Stores scrapen
+                    stores = scrape_stores(page)
+                    log.info(f"  {len(stores)} Läden gefunden")
+                    for s in stores:
+                        log.info(f"    {s['name']} ({s['distance']}) – {s['avail_txt']}")
 
-                # Stores scrapen
-                stores = scrape_stores(page)
-                log.info(f"  {len(stores)} Läden gefunden")
-                for s in stores:
-                    log.info(f"    {s['name']} ({s['distance']}) – {s['avail_txt']}")
+                    # Screenshot
+                    screenshot_path = SCREENSHOT_DIR / f"cube_{groesse}_{ts}.png"
+                    page.screenshot(path=str(screenshot_path), full_page=False)
+                    browser.close()
 
-                # Screenshot
-                screenshot_path = SCREENSHOT_DIR / f"cube_{groesse}_{ts}.png"
-                page.screenshot(path=str(screenshot_path), full_page=False)
-                browser.close()
+                all_results.append((groesse, stores))
+                break
 
-            all_results.append((groesse, stores))
-
-        except PWTimeout:
-            log.error(f"  Timeout für Größe {groesse}")
-        except Exception as exc:
-            log.error(f"  Unerwarteter Fehler: {exc}", exc_info=True)
+            except PWTimeout:
+                log.warning(f"  Timeout für Größe {groesse} (Versuch {versuch}/2)")
+                if versuch == 2:
+                    log.error(f"  Größe {groesse} nach 2 Versuchen übersprungen")
+                else:
+                    time.sleep(5)
+            except Exception as exc:
+                log.error(f"  Unerwarteter Fehler: {exc}", exc_info=True)
+                break
 
     return all_results
 
